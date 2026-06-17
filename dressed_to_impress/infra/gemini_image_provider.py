@@ -11,7 +11,7 @@ from ..core.domain.image_asset import ImageAsset
 from ..core.ports.errors import InfraError
 from ..core.ports.image_generation_provider import ImageGenerationProvider
 
-DEFAULT_MODEL = "gemini-2.5-flash-image-preview"
+DEFAULT_MODEL = "gemini-3.1-flash-image"
 
 
 class GeminiImageProvider(ImageGenerationProvider):

@@ -11,6 +11,8 @@ import argparse
 import os
 import sys
 
+from dotenv import find_dotenv, load_dotenv
+
 from ..core.commands.dress_command import DressCommand
 from ..core.use_cases.dress_use_case import DressUseCase
 from ..infra.filesystem_image_repository import FilesystemImageRepository
@@ -43,7 +45,20 @@ def default_output_path(person_path: str) -> str:
     return f"{root}-dressed.png"
 
 
+def load_env() -> None:
+    """Load environment variables from a .env file.
+
+    Searches from the current working directory upward, then falls back to the
+    .env next to this module so the CLI works regardless of where it is invoked.
+    Existing environment variables take precedence and are never overwritten.
+    """
+    load_dotenv(find_dotenv(usecwd=True))
+    load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
+
+
 def main(argv: list[str] | None = None) -> int:
+    load_env()
+
     args = build_parser().parse_args(argv)
 
     api_key = os.environ.get("GEMINI_API_KEY")
