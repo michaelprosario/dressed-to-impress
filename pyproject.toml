@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dressed-to-impress"
+version = "0.1.0"
+description = "CLI virtual try-on: dress a person in an outfit using Gemini image generation."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "google-genai>=0.3",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7",
+]
+
+[project.scripts]
+dress = "dressed_to_impress.cli.main:main"
+
+[tool.setuptools.packages.find]
+include = ["dressed_to_impress*"]
