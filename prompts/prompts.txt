@@ -1,0 +1,17 @@
+- explore prompts/cleanArchitecture.md
+- read over code lab: https://github.com/GoogleCloudPlatform/generative-ai/blob/main/gemini/nano-banana/nano_banana_recipes.ipynb
+
+### use case
+- given
+    - I provide the path to outfit image
+    - I provide the path to person image
+- when I execute the dress command
+- then the system invokes a process to create an image of person in the outfit
+
+### tech stack
+- python
+- gemini
+- cli
+
+Think about requirements
+Document code plan for cli in cliPlan.md
