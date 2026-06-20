@@ -1,3 +1,5 @@
+6/17
+
 - explore prompts/cleanArchitecture.md
 - read over code lab: https://github.com/GoogleCloudPlatform/generative-ai/blob/main/gemini/nano-banana/nano_banana_recipes.ipynb
 
@@ -15,3 +17,36 @@
 
 Think about requirements
 Document code plan for cli in cliPlan.md
+
+===
+
+- Review prompts/cleanArchitecture.md
+- Think about the following requirements
+
+given
+- I have uploaded an output fit image to cloud storage
+- I have uploaded a person image to cloud storage
+
+When
+- I send a queue message requesting the dress execution 
+    inputs:
+    - outfit image
+    - person image
+    - output image file name
+
+then
+- the system needs to download the outfit image from storage bucket to local file system
+- the system needs to download the person image from storage bucket to local file system
+- execute the "dress" operation using the outfit and person image
+- write output to local file system
+- upload the output file to storage bucket
+
+Document plan for dressCloudFunction implementation.
+
+
+
+===
+
+as a user, I can upload a file to a storage bucket to enable future cloud processing
+
+
