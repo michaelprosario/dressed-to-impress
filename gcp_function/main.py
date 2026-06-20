@@ -1,4 +1,4 @@
-"""Google Cloud Function trigger/handler for virtual try-on requests."""
+"""Google Cloud Function trigger/handler for virtual try-on and upload requests."""
 
 from __future__ import annotations
 
@@ -10,8 +10,10 @@ import sys
 import functions_framework
 
 from dressed_to_impress.core.commands.cloud_dress_command import CloudDressCommand
+from dressed_to_impress.core.commands.upload_image_command import UploadImageCommand
 from dressed_to_impress.core.use_cases.cloud_dress_use_case import CloudDressUseCase
 from dressed_to_impress.core.use_cases.dress_use_case import DressUseCase
+from dressed_to_impress.core.use_cases.upload_image_use_case import UploadImageUseCase
 from dressed_to_impress.infra.filesystem_image_repository import (
     FilesystemImageRepository,
 )
@@ -32,8 +34,9 @@ INPUT_BUCKET = os.environ.get("INPUT_BUCKET", "dressed-to-impress-inputs")
 OUTPUT_BUCKET = os.environ.get("OUTPUT_BUCKET", "dressed-to-impress-outputs")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 
-# Composition Root for the Cloud Function (Lazy initialization for performance)
+# Composition Roots for the Cloud Function (Lazy initialization for performance)
 _cloud_use_case = None
+_upload_use_case = None
 
 
 def get_cloud_use_case() -> CloudDressUseCase:
@@ -65,6 +68,19 @@ def get_cloud_use_case() -> CloudDressUseCase:
         )
         logger.info("CloudDressUseCase successfully initialized.")
     return _cloud_use_case
+
+
+def get_upload_use_case() -> UploadImageUseCase:
+    global _upload_use_case
+    if _upload_use_case is None:
+        logger.info("Initializing upload composition root for cloud function...")
+        blob_repo = GcsBlobRepository()
+        _upload_use_case = UploadImageUseCase(
+            blob_repo=blob_repo,
+            default_bucket=INPUT_BUCKET,
+        )
+        logger.info("UploadImageUseCase successfully initialized.")
+    return _upload_use_case
 
 
 # Entry point for Pub/Sub triggers
@@ -125,6 +141,60 @@ def dress_http_handler(request):
             "errors": result.validation_errors,
         }, 400
     return {"status": "failure", "message": result.message}, 500
+
+
+# Entry point for uploading files
+@functions_framework.http
+def upload_handler(request):
+    """HTTP trigger to upload a file to the storage bucket."""
+    logger.info(
+        "Received HTTP request to upload_handler. Method: %s", request.method
+    )
+    if request.method != "POST":
+        logger.warning(
+            "Method %s rejected. Only POST method is accepted.", request.method
+        )
+        return "Only POST method is accepted", 405
+
+    # Check if file is in multipart form-data
+    if "file" not in request.files:
+        logger.warning("No file part in the multipart form-data request.")
+        return "Missing 'file' parameter in multipart form data", 400
+
+    file = request.files["file"]
+    filename = file.filename
+    if not filename:
+        logger.warning("Empty filename received in upload request.")
+        return "Empty filename", 400
+
+    file_bytes = file.read()
+    bucket_override = request.form.get("bucket")
+
+    cmd = UploadImageCommand(
+        filename=filename,
+        data=file_bytes,
+        bucket_name=bucket_override,
+    )
+
+    try:
+        use_case = get_upload_use_case()
+        result = use_case.execute(cmd)
+
+        if result.success:
+            return {"status": "success", "gcs_uri": result.value}, 200
+
+        if result.validation_errors:
+            return {
+                "status": "validation_error",
+                "errors": result.validation_errors,
+            }, 400
+        return {"status": "failure", "message": result.message}, 500
+    except Exception as exc:
+        logger.exception("Unexpected exception inside upload_handler: %s", exc)
+        return {
+            "status": "failure",
+            "message": f"Unexpected internal failure: {exc}",
+        }, 500
 
 
 def _execute_payload(payload: dict):

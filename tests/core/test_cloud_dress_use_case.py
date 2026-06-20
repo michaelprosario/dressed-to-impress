@@ -1,4 +1,4 @@
-"""Unit tests for CloudDressUseCase — no disk, no GCS network."""
+"""Unit tests for CloudDressUseCase and UploadImageUseCase — no disk, no GCS network."""
 
 from __future__ import annotations
 
@@ -6,9 +6,11 @@ import os
 import pytest
 
 from dressed_to_impress.core.commands.cloud_dress_command import CloudDressCommand
+from dressed_to_impress.core.commands.upload_image_command import UploadImageCommand
 from dressed_to_impress.core.ports.errors import InfraError
 from dressed_to_impress.core.use_cases.cloud_dress_use_case import CloudDressUseCase
 from dressed_to_impress.core.use_cases.dress_use_case import DressUseCase
+from dressed_to_impress.core.use_cases.upload_image_use_case import UploadImageUseCase
 from tests.fakes import FakeImageGenerationProvider, FakeImageRepository
 
 
@@ -17,15 +19,19 @@ class FakeBlobRepository:
         self,
         existing_blobs: dict[str, bytes] | None = None,
         image_repo: FakeImageRepository | None = None,
+        simulate_error: str | None = None,
     ) -> None:
         self.blobs = dict(existing_blobs or {})
         self._image_repo = image_repo
+        self._simulate_error = simulate_error
         self.downloads: list[tuple[str, str, str]] = []
         self.uploads: list[tuple[str, str, str]] = []
 
     def download_to_file(
         self, bucket_name: str, blob_name: str, local_path: str
     ) -> None:
+        if self._simulate_error:
+            raise InfraError(self._simulate_error)
         key = f"gs://{bucket_name}/{blob_name}"
         if key not in self.blobs:
             raise InfraError(f"Blob not found: {key}")
@@ -43,6 +49,8 @@ class FakeBlobRepository:
     def upload_from_file(
         self, local_path: str, bucket_name: str, blob_name: str
     ) -> None:
+        if self._simulate_error:
+            raise InfraError(self._simulate_error)
         self.uploads.append((local_path, bucket_name, blob_name))
         
         # Check in the fake local repository's written files first
@@ -182,3 +190,72 @@ def test_cloud_use_case_inner_validation_error(tmp_path):
     assert not result.success
     assert "Core execution failed" in result.message
     assert "person image must be one of" in result.message
+
+
+# ==========================================
+# UploadImageUseCase Tests
+# ==========================================
+
+def test_upload_image_happy_path():
+    blob_repo = FakeBlobRepository()
+    use_case = UploadImageUseCase(blob_repo=blob_repo, default_bucket="test-bucket")
+
+    cmd = UploadImageCommand(
+        filename="person.jpg",
+        data=b"my-image-content-bytes",
+    )
+
+    result = use_case.execute(cmd)
+
+    assert result.success
+    assert result.value == "gs://test-bucket/person.jpg"
+    assert "gs://test-bucket/person.jpg" in blob_repo.blobs
+    assert blob_repo.blobs["gs://test-bucket/person.jpg"] == b"my-image-content-bytes"
+
+
+def test_upload_image_validation_errors():
+    blob_repo = FakeBlobRepository()
+    use_case = UploadImageUseCase(blob_repo=blob_repo, default_bucket="test-bucket")
+
+    # 1. Missing / empty filename
+    cmd_empty_name = UploadImageCommand(
+        filename="   ",
+        data=b"data",
+    )
+    result = use_case.execute(cmd_empty_name)
+    assert not result.success
+    assert any("Filename is required" in err for err in result.validation_errors)
+
+    # 2. Unsupported extension (e.g. .txt)
+    cmd_bad_ext = UploadImageCommand(
+        filename="notes.txt",
+        data=b"data",
+    )
+    result = use_case.execute(cmd_bad_ext)
+    assert not result.success
+    assert any("Unsupported file type" in err for err in result.validation_errors)
+
+    # 3. Missing data bytes
+    cmd_no_data = UploadImageCommand(
+        filename="person.png",
+        data=b"",
+    )
+    result = use_case.execute(cmd_no_data)
+    assert not result.success
+    assert any("File content data is empty or missing" in err for err in result.validation_errors)
+
+
+def test_upload_image_infrastructure_error():
+    blob_repo = FakeBlobRepository(simulate_error="GCS connection timed out")
+    use_case = UploadImageUseCase(blob_repo=blob_repo, default_bucket="test-bucket")
+
+    cmd = UploadImageCommand(
+        filename="person.png",
+        data=b"image-data",
+    )
+
+    result = use_case.execute(cmd)
+
+    assert not result.success
+    assert "Infrastructure failure" in result.message
+    assert "GCS connection timed out" in result.message
