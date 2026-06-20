@@ -43,13 +43,25 @@ then
 
 Document plan for dressCloudFunction implementation.
 
-
-
 ===
 
 Implement this feature:
 as a user, I can upload a file to a storage bucket to enable future cloud processing
 - update google cloud function to enable upload file to storage bucket
 - storage bucket location will be used for dress operations
+
+===
+
+For a novice python programmer, write blog post exploring how we accomplish the "dress" cli
+- explore dressed_to_impress/cli/main.py
+- talk about concepts used in the program
+- document in dressHowTo.md
+
+====
+
+For a novice python programmer, write blog post exploring how we accomplish the "dress" cli
+- explore gcp_function/main.py
+- talk about concepts used in the program
+- document in dressCloudFunction.md
 
 
