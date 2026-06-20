@@ -1,0 +1,5 @@
+functions-framework>=3.0
+google-cloud-storage>=2.0
+google-genai>=0.3
+# Pillow is required for MIME and file extensions handling
+Pillow>=9.0

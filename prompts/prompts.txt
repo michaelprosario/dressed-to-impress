@@ -46,7 +46,7 @@ Document plan for dressCloudFunction implementation.
 
 
 ===
-
+Implement this feature:
 as a user, I can upload a file to a storage bucket to enable future cloud processing
 
 

@@ -7,7 +7,7 @@ This document outlines the architectural plan for implementing the `dressCloudFu
 3. Uploading the resulting image back to a destination GCS bucket.
 4. Cleaning up temporary files to prevent memory leak issues (since `/tmp` in Cloud Functions is backed by memory).
 
-This design strictly adheres to the Clean Architecture principles outlined in [cleanArchitecture.md](file:///home/user/dressed-to-impress/prompts/cleanArchitecture.md).
+This design strictly adheres to the Clean Architecture principles outlined in [cleanArchitecture.md](file:///home/user/dressed-to-impress/prompts/cleanArchitecture.md) and incorporates comprehensive structured logging for easy troubleshooting and monitoring.
 
 ---
 
@@ -43,6 +43,7 @@ graph TD
    - `outfit_image` (relative path or full URI `gs://...`)
    - `output_image_name` (filename or full URI `gs://...`)
 2. **Cloud Function Entry Point** (`main.py`) acts as the **Composition Root**. It:
+   - Sets up logging configurations.
    - Validates the payload.
    - Extracts bucket configurations (falling back to environment variables like `INPUT_BUCKET` and `OUTPUT_BUCKET`).
    - Instantiates the adapters: `GcsBlobRepository` and `GeminiImageProvider`.
@@ -103,6 +104,7 @@ Defined in [cloud_dress_use_case.py](file:///home/user/dressed-to-impress/dresse
 import os
 import shutil
 import uuid
+import logging
 from urllib.parse import urlparse
 from ..commands.cloud_dress_command import CloudDressCommand
 from ..commands.dress_command import DressCommand
@@ -110,6 +112,8 @@ from ..ports.blob_repository import BlobRepository
 from ..ports.errors import InfraError
 from ..use_cases.dress_use_case import DressUseCase
 from ..results.app_result import AppResult
+
+logger = logging.getLogger(__name__)
 
 class CloudDressUseCase:
     def __init__(
@@ -127,12 +131,22 @@ class CloudDressUseCase:
         self._temp_dir_base = temp_dir_base
 
     def execute(self, cmd: CloudDressCommand) -> AppResult[str]:
+        logger.info(
+            "Starting CloudDressUseCase execution with person_uri=%s, outfit_uri=%s, output_name=%s",
+            cmd.person_image_uri, cmd.outfit_image_uri, cmd.output_image_name
+        )
+
         # 1. Parse URI and bucket names
         try:
             p_bucket, p_blob = self._parse_uri(cmd.person_image_uri, self._default_input_bucket)
             o_bucket, o_blob = self._parse_uri(cmd.outfit_image_uri, self._default_input_bucket)
             out_bucket, out_blob = self._parse_uri(cmd.output_image_name, self._default_output_bucket)
+            logger.debug(
+                "Parsed GCS URIs: person=gs://%s/%s, outfit=gs://%s/%s, output=gs://%s/%s",
+                p_bucket, p_blob, o_bucket, o_blob, out_bucket, out_blob
+            )
         except ValueError as err:
+            logger.warning("URI parsing failed validation: %s", err)
             return AppResult.invalid([str(err)])
 
         # 2. Setup isolated temp directory
@@ -143,11 +157,15 @@ class CloudDressUseCase:
         local_outfit = os.path.join(work_dir, "outfit" + os.path.splitext(o_blob)[1])
         local_output = os.path.join(work_dir, "output" + os.path.splitext(out_blob)[1])
 
+        logger.debug("Creating isolated local working directory: %s", work_dir)
         os.makedirs(work_dir, exist_ok=True)
 
         try:
             # 3. Download files from bucket
+            logger.info("Downloading person image from gs://%s/%s -> %s", p_bucket, p_blob, local_person)
             self._blob_repo.download_to_file(p_bucket, p_blob, local_person)
+            
+            logger.info("Downloading outfit image from gs://%s/%s -> %s", o_bucket, o_blob, local_outfit)
             self._blob_repo.download_to_file(o_bucket, o_blob, local_outfit)
 
             # 4. Invoke local DressUseCase
@@ -157,22 +175,39 @@ class CloudDressUseCase:
                 output_path=local_output,
                 prompt_override=cmd.prompt_override
             )
+            
+            logger.info("Executing core DressUseCase locally")
             result = self._dress_use_case.execute(local_cmd)
             
             if not result.success:
+                logger.error(
+                    "Core DressUseCase execution failed. Validation: %s, Message: %s",
+                    result.validation_errors, result.message
+                )
                 return AppResult.failure(f"Core execution failed: {result.message or result.validation_errors}")
 
             # 5. Upload to destination bucket
+            logger.info("Uploading output to gs://%s/%s from local path %s", out_bucket, out_blob, local_output)
             self._blob_repo.upload_from_file(local_output, out_bucket, out_blob)
             
             destination_uri = f"gs://{out_bucket}/{out_blob}"
+            logger.info("Successfully completed CloudDressUseCase. Output uploaded to: %s", destination_uri)
             return AppResult.ok(destination_uri, "Process executed successfully.")
             
         except InfraError as exc:
+            logger.exception("Infrastructure failure during cloud dress execution: %s", exc)
             return AppResult.failure(f"Infrastructure failure: {exc}")
+        except Exception as exc:
+            logger.exception("Unhandled exception during cloud dress execution: %s", exc)
+            return AppResult.failure(f"Unexpected error: {exc}")
         finally:
             # 6. Cleanup local filesystem to prevent memory leaks in Cloud Functions
-            shutil.rmtree(work_dir, ignore_errors=True)
+            logger.debug("Cleaning up local working directory: %s", work_dir)
+            try:
+                shutil.rmtree(work_dir)
+                logger.debug("Cleanup successful.")
+            except Exception as cleanup_err:
+                logger.warning("Failed to clean up workspace directory %s: %s", work_dir, cleanup_err)
 
     def _parse_uri(self, uri: str, default_bucket: str) -> tuple[str, str]:
         if uri.startswith("gs://"):
@@ -230,6 +265,7 @@ The cloud function receives queue events. We support two common patterns: **Pub/
 import json
 import os
 import sys
+import logging
 import functions_framework
 from google.cloud import storage
 
@@ -239,6 +275,15 @@ from dressed_to_impress.core.use_cases.cloud_dress_use_case import CloudDressUse
 from dressed_to_impress.infra.filesystem_image_repository import FilesystemImageRepository
 from dressed_to_impress.infra.gemini_image_provider import GeminiImageProvider
 from dressed_to_impress.infra.gcs_blob_repository import GcsBlobRepository
+
+# Configure logging to write structured output to stdout (which Google Cloud Logging captures)
+LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO").upper()
+logging.basicConfig(
+    level=getattr(logging, LOG_LEVEL, logging.INFO),
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    stream=sys.stdout
+)
+logger = logging.getLogger("dressCloudFunction")
 
 # Global configuration from Env Vars
 INPUT_BUCKET = os.environ.get("INPUT_BUCKET", "dressed-to-impress-inputs")
@@ -251,10 +296,13 @@ _cloud_use_case = None
 def get_cloud_use_case() -> CloudDressUseCase:
     global _cloud_use_case
     if _cloud_use_case is None:
+        logger.info("Initializing composition root for cloud function...")
         if not GEMINI_API_KEY:
+            logger.critical("GEMINI_API_KEY environment variable is not configured. Execution cannot proceed.")
             raise RuntimeError("GEMINI_API_KEY environment variable is not configured.")
         
         # Core & Infra wiring
+        logger.info("Instantiating GcsBlobRepository, FilesystemImageRepository, and GeminiImageProvider")
         blob_repo = GcsBlobRepository()
         local_repo = FilesystemImageRepository()
         gemini_provider = GeminiImageProvider(api_key=GEMINI_API_KEY)
@@ -266,20 +314,24 @@ def get_cloud_use_case() -> CloudDressUseCase:
             default_input_bucket=INPUT_BUCKET,
             default_output_bucket=OUTPUT_BUCKET
         )
+        logger.info("CloudDressUseCase successfully initialized.")
     return _cloud_use_case
 
 # Entry point for Pub/Sub triggers
 @functions_framework.cloud_event
 def dress_pubsub_handler(cloud_event) -> None:
     """Triggered from a message on a Cloud Pub/Sub topic."""
+    event_id = cloud_event.data.get("message", {}).get("messageId", "unknown")
+    logger.info("Received Pub/Sub cloud event with messageId: %s", event_id)
     try:
         # Pub/Sub payload is base64 encoded in cloud_event.data["message"]["data"]
         import base64
         pubsub_data = cloud_event.data["message"]["data"]
         message_str = base64.b64decode(pubsub_data).decode("utf-8")
         payload = json.loads(message_str)
+        logger.debug("Decoded Pub/Sub payload for messageId %s: %s", event_id, payload)
     except Exception as exc:
-        print(f"Error parsing Pub/Sub message payload: {exc}", file=sys.stderr)
+        logger.exception("Failed to parse Pub/Sub message payload for event %s: %s", event_id, exc)
         return
 
     _execute_payload(payload)
@@ -288,14 +340,18 @@ def dress_pubsub_handler(cloud_event) -> None:
 @functions_framework.http
 def dress_http_handler(request):
     """Triggered from an HTTP POST request (e.g., from Cloud Tasks)."""
+    logger.info("Received HTTP request to dress_http_handler. Method: %s", request.method)
     if request.method != "POST":
+        logger.warning("Method %s rejected. Only POST method is accepted.", request.method)
         return "Only POST method is accepted", 405
 
     try:
         payload = request.get_json(silent=True)
         if not payload:
+            logger.warning("Empty or invalid JSON body received in HTTP request.")
             return "Invalid JSON body", 400
     except Exception as exc:
+        logger.exception("Error parsing HTTP request JSON payload: %s", exc)
         return f"Error parsing JSON payload: {exc}", 400
 
     result = _execute_payload(payload)
@@ -313,6 +369,11 @@ def _execute_payload(payload: dict):
     output_image_name = payload.get("output_image_name")
     prompt_override = payload.get("prompt_override")
 
+    logger.info(
+        "Processing execution payload: person_image=%s, outfit_image=%s, output_image_name=%s",
+        person_image, outfit_image, output_image_name
+    )
+
     cmd = CloudDressCommand(
         person_image_uri=person_image,
         outfit_image_uri=outfit_image,
@@ -320,24 +381,48 @@ def _execute_payload(payload: dict):
         prompt_override=prompt_override
     )
 
-    use_case = get_cloud_use_case()
-    result = use_case.execute(cmd)
-    
-    if result.success:
-        print(f"✓ Successfully processed dress execution. Output uploaded to: {result.value}")
-    else:
-        print(f"✗ Failed to process dress execution. Validation: {result.validation_errors}, Error: {result.message}", file=sys.stderr)
-    
-    return result
+    try:
+        use_case = get_cloud_use_case()
+        result = use_case.execute(cmd)
+        
+        if result.success:
+            logger.info("✓ Successfully processed dress execution. Output uploaded to: %s", result.value)
+        else:
+            logger.error(
+                "✗ Failed to process dress execution. Validation: %s, Error: %s",
+                result.validation_errors, result.message
+            )
+        return result
+    except Exception as exc:
+        logger.exception("Unexpected exception inside _execute_payload: %s", exc)
+        return AppResult.failure(f"Unexpected internal failure: {exc}")
 ```
 
 ---
 
-## 6. Testing Strategy
+## 6. Logging & Troubleshooting Strategy
+
+To facilitate troubleshooting and health-monitoring in production, the design follows standard Cloud Logging best practices:
+
+### 6.1 Log Levels
+- `DEBUG`: Used for fine-grained workflow details (e.g., specific paths in `/tmp`, URI parsing breakdowns, cleanup receipts).
+- `INFO`: Captures start and end points of core actions (e.g., event delivery, download start/finish, Gemini local execution, upload completed).
+- `WARNING`: Used for validation issues (e.g. invalid URIs) or expected transient filesystem retry attempts.
+- `ERROR`: Captures pipeline failures (e.g., local usecase failure, SDK timeouts, failed downloads/uploads). Accompanied by full tracebacks.
+- `CRITICAL`: Used for missing environmental requirements (e.g., missing API keys) where the function cannot spin up.
+
+### 6.2 Monitoring & Alerts
+1. **Error Rate Monitoring**: Set up a log-based metric in Google Cloud Monitoring targeting `resource.type="cloud_function"` AND `severity>=ERROR`. Create an alerting policy if the metric goes above 0 in a 5-minute window.
+2. **Execution Time (Latency) Tracking**: Measure execution duration to identify if download times or Gemini image generation latency spike.
+3. **Execution ID Correlation**: Since Cloud Functions prints standard output to Google Cloud Logging, execution IDs are automatically correlated per request in Gen 2. `getLogger` will use local scope identifiers to ensure trace contexts align.
+
+---
+
+## 7. Testing Strategy
 
 We extend the test suite with unit tests and integration tests adhering to the Clean Architecture patterns.
 
-### 6.1 Unit Testing the Cloud Use Case
+### 7.1 Unit Testing the Cloud Use Case
 We write tests using an in-memory `FakeBlobRepository` and mocking the underlying `DressUseCase`.
 
 Defined in [test_cloud_dress_use_case.py](file:///home/user/dressed-to-impress/tests/core/test_cloud_dress_use_case.py):
@@ -408,7 +493,7 @@ def test_cloud_use_case_happy_path(tmp_path):
 
 ---
 
-## 7. Deployment Instructions
+## 8. Deployment Instructions
 
 To deploy the Cloud Function to Google Cloud Platform:
 
@@ -419,7 +504,7 @@ gcloud functions deploy dressCloudFunction \
     --region=us-central1 \
     --entry-point=dress_pubsub_handler \
     --trigger-topic=dress-execution-requests \
-    --set-env-vars="GEMINI_API_KEY=your_gemini_api_key,INPUT_BUCKET=your_input_bucket,OUTPUT_BUCKET=your_output_bucket"
+    --set-env-vars="GEMINI_API_KEY=your_gemini_api_key,INPUT_BUCKET=your_input_bucket,OUTPUT_BUCKET=your_output_bucket,LOG_LEVEL=INFO"
 ```
 
 For Cloud Tasks integration, deploy using HTTP trigger option:
@@ -431,5 +516,5 @@ gcloud functions deploy dressCloudFunctionHttp \
     --entry-point=dress_http_handler \
     --trigger-http \
     --no-allow-unauthenticated \
-    --set-env-vars="GEMINI_API_KEY=your_gemini_api_key,INPUT_BUCKET=your_input_bucket,OUTPUT_BUCKET=your_output_bucket"
+    --set-env-vars="GEMINI_API_KEY=your_gemini_api_key,INPUT_BUCKET=your_input_bucket,OUTPUT_BUCKET=your_output_bucket,LOG_LEVEL=INFO"
 ```
